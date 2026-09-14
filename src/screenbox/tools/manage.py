@@ -18,6 +18,26 @@ log = logging.getLogger(__name__)
 _RDP_HOST = os.environ.get("SCREENBOX_NOVNC_HOST", "localhost")
 
 
+def _owner_error(desktop_id: str) -> Optional[str]:
+    """Return an error string if the caller may not access desktop_id, else None.
+
+    Admins bypass ownership. Non-admin callers must be authenticated and hold
+    the desktop assignment (or the desktop must be unassigned).
+    """
+    from ..request_context import get_current_agent, is_admin
+    from ..globals import guard
+    if is_admin():
+        return None
+    agent = get_current_agent()
+    if not agent or agent == "unknown":
+        return "Authentication required."
+    try:
+        guard.check_desktop_access(agent, desktop_id)
+    except ValueError as e:
+        return str(e)
+    return None
+
+
 def register(mcp, get_desktop, get_manager, log_action, app_catalog):
 
     def _desktop_create(desktop_id: str, label=None, url="none", resolution=None, image=None,
@@ -339,6 +359,9 @@ def register(mcp, get_desktop, get_manager, log_action, app_catalog):
         # --- Agent Auth (unified with HTTP API) ---
         if action == "register":
             # Register new agent (admin-only via MCP)
+            from ..request_context import is_admin
+            if not is_admin():
+                return json.dumps({"error": "Admin credentials required to register agents."})
             from ..globals import registry as _reg
             if not agent_id:
                 return json.dumps({"error": "register requires agent_id"})
@@ -375,9 +398,9 @@ def register(mcp, get_desktop, get_manager, log_action, app_catalog):
                 _guard.clear_session()
             result = {"logged_out": True}
         elif action == "whoami":
-            from ..globals import guard as _guard, registry as _reg
+            from ..globals import registry as _reg
             from ..request_context import get_current_agent
-            agent = get_current_agent() or _guard.current_agent
+            agent = get_current_agent()
             if agent:
                 desktops = _reg.get_agent_desktops(agent)
                 result = {"agent_id": agent, "authenticated": True, "desktops": desktops}
@@ -387,8 +410,9 @@ def register(mcp, get_desktop, get_manager, log_action, app_catalog):
         # --- Lifecycle ---
         elif action == "create":
             from ..globals import guard as _guard
+            from ..request_context import get_current_agent
             try:
-                _guard.check_desktop_create(_guard.current_agent)
+                _guard.check_desktop_create(get_current_agent())
             except ValueError as e:
                 return json.dumps({"error": str(e)})
             if not desktop_id:
@@ -418,14 +442,16 @@ def register(mcp, get_desktop, get_manager, log_action, app_catalog):
             return rv
         elif action == "destroy":
             # Auth required for destructive operations
-            from ..request_context import get_current_agent, get_current_role
-            from ..globals import guard as _guard
-            agent = get_current_agent() or _guard.current_agent
+            from ..request_context import get_current_agent
+            agent = get_current_agent()
             if not agent or agent == "unknown":
                 return json.dumps({
                     "error": "Authentication required for destroy. "
                     "Pass API key via Authorization header."
                 })
+            owner_err = _owner_error(desktop_id)
+            if owner_err:
+                return json.dumps({"error": owner_err})
             # Check desktop lock
             from ..globals import registry as _reg
             if _reg.is_locked(desktop_id):
@@ -448,6 +474,9 @@ def register(mcp, get_desktop, get_manager, log_action, app_catalog):
             result = {"destroyed": ok, "desktop_id": desktop_id,
                       "snapshot_saved": snap_exists if save_snapshot else False}
         elif action == "list":
+            from ..request_context import is_admin
+            if not is_admin():
+                return json.dumps({"error": "Admin credentials required to list all desktops."})
             # Auto-discover externally-created containers (dashboard, docker CLI)
             mgr._recover_existing()
             desktops = mgr.list_desktops()
@@ -464,34 +493,67 @@ def register(mcp, get_desktop, get_manager, log_action, app_catalog):
             return _desktop_status(desktop_id)
         elif action == "pause":
             from ..request_context import get_current_agent
-            from ..globals import guard as _guard
-            agent = get_current_agent() or _guard.current_agent
+            agent = get_current_agent()
             if not agent or agent == "unknown":
                 return json.dumps({"error": "Authentication required for pause."})
+            owner_err = _owner_error(desktop_id)
+            if owner_err:
+                return json.dumps({"error": owner_err})
             ok = mgr.pause(desktop_id)
             result = {"paused": ok, "desktop_id": desktop_id}
         elif action == "resume":
             from ..request_context import get_current_agent
-            from ..globals import guard as _guard
-            agent = get_current_agent() or _guard.current_agent
+            agent = get_current_agent()
             if not agent or agent == "unknown":
                 return json.dumps({"error": "Authentication required for resume."})
+            owner_err = _owner_error(desktop_id)
+            if owner_err:
+                return json.dumps({"error": owner_err})
             ok = mgr.resume(desktop_id)
             result = {"resumed": ok, "desktop_id": desktop_id}
         elif action == "acquire":
+            from ..request_context import get_current_agent, is_admin
+            caller = get_current_agent()
+            if not caller or caller == "unknown":
+                return json.dumps({"error": "Authentication required for acquire."})
+            if not is_admin():
+                if agent_id and agent_id != caller:
+                    return json.dumps({"error": "Cannot acquire on behalf of another agent."})
+                agent_id = caller
             if not agent_id:
                 return json.dumps({"error": "acquire requires agent_id"})
             if desktop_id:
+                owner_err = _owner_error(desktop_id)
+                if owner_err:
+                    return json.dumps({"error": owner_err})
                 result = mgr.acquire(desktop_id, agent_id)
             else:
                 # Smart acquire: auto-pick best available desktop
                 result = mgr.smart_acquire(agent_id, desktop_id=None)
         elif action == "smart_acquire":
+            from ..request_context import get_current_agent, is_admin
+            caller = get_current_agent()
+            if not caller or caller == "unknown":
+                return json.dumps({"error": "Authentication required for smart_acquire."})
+            if not is_admin():
+                if agent_id and agent_id != caller:
+                    return json.dumps({"error": "Cannot acquire on behalf of another agent."})
+                agent_id = caller
             if not agent_id:
                 return json.dumps({"error": "smart_acquire requires agent_id"})
+            if desktop_id:
+                owner_err = _owner_error(desktop_id)
+                if owner_err:
+                    return json.dumps({"error": owner_err})
             result = mgr.smart_acquire(agent_id, desktop_id=desktop_id or None)
         elif action == "release":
-            ok = mgr.release(desktop_id, agent_id or None)
+            from ..request_context import get_current_agent, is_admin
+            caller = get_current_agent()
+            if not caller or caller == "unknown":
+                return json.dumps({"error": "Authentication required for release."})
+            if not is_admin() and agent_id and agent_id != caller:
+                return json.dumps({"error": "Cannot release on behalf of another agent."})
+            ok = mgr.release(desktop_id, agent_id or caller)
             result = {"released": ok, "desktop_id": desktop_id}
         elif action == "heartbeat":
             return _desktop_heartbeat(desktop_id, agent_id)
@@ -501,13 +563,22 @@ def register(mcp, get_desktop, get_manager, log_action, app_catalog):
 
         # --- Snapshots ---
         elif action == "snapshot_save":
+            owner_err = _owner_error(desktop_id)
+            if owner_err:
+                return json.dumps({"error": owner_err})
             filename = mgr.snapshot(desktop_id, label)
             result = {"saved": bool(filename), "filename": filename or "",
                       "desktop_id": desktop_id}
         elif action == "snapshot_restore":
+            owner_err = _owner_error(desktop_id)
+            if owner_err:
+                return json.dumps({"error": owner_err})
             ok = mgr.restore(desktop_id, snapshot_name or None)
             result = {"restored": ok, "desktop_id": desktop_id}
         elif action == "snapshot_list":
+            owner_err = _owner_error(desktop_id)
+            if owner_err:
+                return json.dumps({"error": owner_err})
             snaps = mgr.list_snapshots(desktop_id)
             return json.dumps(snaps, indent=2)
 
@@ -777,6 +848,9 @@ def register(mcp, get_desktop, get_manager, log_action, app_catalog):
             from ..globals import registry as _reg
             if not desktop_id:
                 return json.dumps({"error": "share requires desktop_id"})
+            owner_err = _owner_error(desktop_id)
+            if owner_err:
+                return json.dumps({"error": owner_err})
             ttl = int(text) if text and text.isdigit() else 3600
             if ttl < 60 or ttl > 86400:
                 ttl = 3600
@@ -799,6 +873,9 @@ def register(mcp, get_desktop, get_manager, log_action, app_catalog):
             from ..globals import registry as _reg
             if not desktop_id:
                 return json.dumps({"error": "unshare requires desktop_id"})
+            owner_err = _owner_error(desktop_id)
+            if owner_err:
+                return json.dumps({"error": owner_err})
             count = _reg.revoke_desktop_shares(desktop_id)
             result = {"revoked": count, "desktop_id": desktop_id}
 

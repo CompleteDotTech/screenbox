@@ -74,21 +74,9 @@ if ! grep -q "^SCREENBOX_RECORDINGS_HOST_DIR=" .env 2>/dev/null; then
 fi
 echo "[OK] Data directories"
 
-# 3. Generate .mcp.json for Claude Code
-TOKEN_VAL=$(grep "^SCREENBOX_API_TOKEN=" .env | cut -d= -f2)
-cat > .mcp.json << MCPEOF
-{
-  "mcpServers": {
-    "screenbox": {
-      "url": "http://localhost:8080/mcp",
-      "headers": {
-        "Authorization": "Bearer ${TOKEN_VAL}"
-      }
-    }
-  }
-}
-MCPEOF
-echo "[OK] .mcp.json"
+# 3. (hardened) Do NOT write .mcp.json -- it embeds the admin API token on disk.
+# Provide credentials to the agent runner through its own secret storage instead.
+echo "[OK] Skipping .mcp.json (hardened build)"
 
 # 4. Build all images
 echo ""
@@ -110,28 +98,9 @@ fi
 docker compose up -d
 echo "[OK] Services running"
 
-# 5b. Create demo desktop (first install only)
-if [ "$IS_UPDATE" = false ]; then
-  echo ""
-  echo "Creating demo desktop..."
-  # Wait for MCP to be healthy (up to 60s)
-  for i in $(seq 1 12); do
-    if curl -sf http://localhost:8080/api/health >/dev/null 2>&1; then
-      break
-    fi
-    sleep 5
-  done
-  RESULT=$(curl -s -X POST -H "Authorization: Bearer ${TOKEN_VAL}" \
-    -H "Content-Type: application/json" \
-    -d '{"id":"desktop-1","label":"My Desktop"}' \
-    http://localhost:8080/api/desktop/create 2>&1)
-  if echo "$RESULT" | grep -q '"ok"'; then
-    echo "[OK] Demo desktop created (desktop-1)"
-  else
-    echo "[WARN] Could not create demo desktop: $RESULT"
-    echo "       Create one from Dashboard: http://localhost:16000"
-  fi
-fi
+# 5b. (hardened) Do NOT create a shared demo desktop on first install.
+# Desktops must be created by/for a specific agent identity.
+echo "[OK] Skipping demo desktop (hardened build)"
 
 # 6. Integration test
 echo ""
@@ -160,15 +129,10 @@ if [ "$IS_UPDATE" = true ]; then
 else
   echo "Screenbox ready!"
   echo ""
-  echo "Dashboard:"
-  echo "  http://localhost:16000?token=${TOKEN_VAL}"
+  echo "Dashboard (token auth enabled -- enter the API token when prompted):"
+  echo "  http://localhost:16000"
   echo ""
-  echo "Connect Claude Code (option A -- from this directory):"
-  echo "  cd $(pwd) && claude"
-  echo "  (.mcp.json is already configured)"
-  echo ""
-  echo "Connect Claude Code (option B -- from anywhere):"
-  echo "  claude mcp add screenbox --transport http \\"
-  echo "    --header \"Authorization: Bearer ${TOKEN_VAL}\" \\"
-  echo "    http://localhost:8080/mcp"
+  echo "MCP endpoint: http://localhost:8080/mcp"
+  echo "  Provide the API token via Authorization: Bearer <token>."
+  echo "  The token is in .env (SCREENBOX_API_TOKEN). Do not commit or share it."
 fi

@@ -15,8 +15,17 @@ def register(mcp, get_desktop, get_manager, log_action, app_catalog):
         mgr = get_manager()
         cfg = mgr.config
 
-        # Running desktops
+        # Running desktops (non-admins only see desktops assigned to them)
         desktops = mgr.list_desktops()
+        from ..request_context import is_admin, get_current_agent
+        if not is_admin():
+            from ..globals import registry as _reg
+            agent = get_current_agent()
+            if not agent or agent == "unknown":
+                return json.dumps({"error": "Authentication required."})
+            assigned = set(_reg.get_agent_desktops(agent))
+            desktops = [d for d in desktops
+                        if d.get("desktop_id") in assigned]
 
         # Grid state per desktop
         for d in desktops:
@@ -118,6 +127,16 @@ def register(mcp, get_desktop, get_manager, log_action, app_catalog):
         """
         mgr = get_manager()
         cfg = mgr.config
+        from ..request_context import is_admin, get_current_agent
+        if not is_admin():
+            from ..globals import guard as _guard
+            agent = get_current_agent()
+            if not agent or agent == "unknown":
+                return json.dumps({"error": "Authentication required."})
+            try:
+                _guard.check_desktop_access(agent, desktop_id)
+            except ValueError as e:
+                return json.dumps({"error": str(e)})
         log_file = cfg.logs_dir / f"{desktop_id}.jsonl"
 
         if not log_file.exists():

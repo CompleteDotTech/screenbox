@@ -101,11 +101,14 @@ class Config:
 
     @property
     def max_desktops(self) -> int:
+        env = os.environ.get("SCREENBOX_MAX_DESKTOPS", "")
+        if env.isdigit():
+            return int(env)
         return int(self.get("max_desktops", 5))
 
     @property
     def memory_limit(self) -> str:
-        return self.get("memory_per_desktop", "512m")
+        return os.environ.get("SCREENBOX_MEMORY_PER_DESKTOP") or self.get("memory_per_desktop", "512m")
 
     @property
     def image(self) -> str:

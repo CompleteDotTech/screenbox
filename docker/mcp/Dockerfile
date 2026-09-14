@@ -26,6 +26,7 @@ COPY src/ src/
 COPY docker/vision-watch.py /opt/vision-watch.py
 
 RUN pip install --no-cache-dir .
+RUN chmod -R a+rX /app
 
 # Run as non-root (docker access via DOCKER_HOST tcp proxy, no socket needed)
 RUN groupadd -g 1000 screenbox \

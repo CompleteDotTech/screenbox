@@ -313,6 +313,39 @@ def register(mcp):
         except Exception as e:
             return JSONResponse({"error": str(e)}, status_code=500)
 
+    # -- Human takeover --
+
+    @mcp.custom_route("/api/desktop/human/acquire", methods=["POST"])
+    async def api_desktop_human_acquire(request: Request) -> Response:
+        """Admin: hand the desktop to a human. Blocks agent tool calls."""
+        if not _check_auth(request):
+            return _auth_error()
+        body = await request.json()
+        did = body.get("id", "").strip()
+        if not did:
+            return JSONResponse({"error": "Missing id"}, status_code=400)
+        kill_inflight = bool(body.get("kill_inflight", False))
+        killed = manager.set_human_controlled(did, kill_inflight=kill_inflight)
+        if killed is None:
+            return JSONResponse({"error": "Desktop not found"}, status_code=404)
+        return JSONResponse({"ok": True, "desktop_id": did,
+                             "state": "human_controlled", "killed": killed})
+
+    @mcp.custom_route("/api/desktop/human/release", methods=["POST"])
+    async def api_desktop_human_release(request: Request) -> Response:
+        """Admin: return the desktop to agent control."""
+        if not _check_auth(request):
+            return _auth_error()
+        body = await request.json()
+        did = body.get("id", "").strip()
+        if not did:
+            return JSONResponse({"error": "Missing id"}, status_code=400)
+        ok = manager.release_human_controlled(did)
+        if not ok:
+            return JSONResponse({"error": "Desktop not in human-controlled state"},
+                                status_code=409)
+        return JSONResponse({"ok": True, "desktop_id": did, "state": "running"})
+
     # -- Overlay --
 
     @mcp.custom_route("/api/desktop/overlay", methods=["POST"])

@@ -43,7 +43,7 @@ if [ "$(id -u)" = "0" ]; then
             echo "[screenbox] Restoring packages:$MISSING"
             (
                 for i in $(seq 1 36); do
-                    if timeout 3 bash -c "echo > /dev/tcp/8.8.8.8/53" 2>/dev/null; then
+                    if timeout 3 getent hosts archive.ubuntu.com >/dev/null 2>&1; then
                         break
                     fi
                     sleep 5

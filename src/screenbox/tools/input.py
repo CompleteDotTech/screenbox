@@ -1,4 +1,5 @@
 """desktop_type, desktop_key, desktop_shell tools."""
+import asyncio
 import json
 import time
 
@@ -80,9 +81,9 @@ def register(mcp, get_desktop, get_manager, log_action, app_catalog):
         return json.dumps(result)
 
     @mcp.tool()
-    def desktop_shell(desktop_id: str, command: str, timeout: int = 30,
-                      intent: str = "",
-                      step: str = "") -> str:
+    async def desktop_shell(desktop_id: str, command: str, timeout: int = 30,
+                            intent: str = "",
+                            step: str = "") -> str:
         """Run shell command inside the desktop container.
 
         Args:
@@ -92,7 +93,9 @@ def register(mcp, get_desktop, get_manager, log_action, app_catalog):
         """
         t0 = time.time()
         d = get_desktop(desktop_id)
-        result = d.shell(command, timeout)
+        # Run the blocking docker exec in a worker thread so the MCP event loop
+        # stays responsive (e.g. human takeover can be handled mid-command).
+        result = await asyncio.to_thread(d.shell, command, timeout)
         # Truncate long output to prevent context pollution (e.g. wget progress)
         MAX_LINES = 50
         HEAD, TAIL = 30, 15

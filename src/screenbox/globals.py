@@ -201,8 +201,10 @@ def get_desktop(desktop_id: str) -> Desktop:
         info.acquired_by = None
         info.acquired_at = None
         info.session_token = None
-    # Resolve identity: per-request contextvar > MCP session > env var
-    effective_agent = get_current_agent() or guard.current_agent or AGENT_ID
+    # Resolve identity strictly from the per-request contextvar (set by the
+    # auth middleware). Do NOT fall back to the process-global MCP session,
+    # which would let one connection inherit another agent's identity.
+    effective_agent = get_current_agent() or AGENT_ID
     effective_role = get_current_role()
     # Admin bypasses all access checks
     if effective_role != "admin":

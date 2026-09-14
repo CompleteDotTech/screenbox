@@ -273,6 +273,7 @@ class Desktop(
             self.desktop_id,
             ["env", f"DISPLAY={DISPLAY}", "bash", "-c", command],
             timeout=timeout,
+            track_shell=True,
         )
         stdout = result.stdout.decode("utf-8", errors="replace") if result.stdout else ""
         stderr = result.stderr.decode("utf-8", errors="replace") if result.stderr else ""

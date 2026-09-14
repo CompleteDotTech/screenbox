@@ -94,6 +94,9 @@ class DesktopManager:
         self._grid_state: dict[str, tuple[int, int]] = {}  # desktop_id -> (cols, rows)
         self._port_lock = threading.Lock()
         self._on_state_change = on_state_change
+        # Tracked, cancellable agent shell commands (desktop_shell) per desktop.
+        self._active_shells: dict[str, set] = {}
+        self._shell_lock = threading.Lock()
         self._check_docker()
         self._recover_existing()
         self._start_sync_loop()
@@ -410,6 +413,10 @@ class DesktopManager:
             self._remove_container(desktop_id)
 
         self.config.reload()
+        # Reconcile with containers that already exist (e.g. after a restart)
+        # so the max_desktops cap is enforced against reality, not just the
+        # in-memory map.
+        self._recover_existing()
         if len([d for d in self._desktops.values()
                 if d.state in (DesktopState.RUNNING, DesktopState.PAUSED)]) >= self.config.max_desktops:
             raise RuntimeError(
@@ -511,7 +518,6 @@ class DesktopManager:
             "-e", f"SCREENBOX_PROFILE={profile_container_path}",
             "-e", f"SCREENBOX_RECORDINGS={recordings_container_path}",
             "--shm-size=256m",
-            "--dns", "8.8.8.8", "--dns", "1.1.1.1",
             "--label", "screenbox.desktop=true",
             image or self.config.image,
         ]
@@ -1187,17 +1193,126 @@ class DesktopManager:
         if info:
             info.last_tool_call = time.time()
 
+    def set_human_controlled(self, desktop_id: str,
+                             kill_inflight: bool = False) -> Optional[int]:
+        """Hand the desktop to a human. Agent tool calls are refused while set.
+
+        Returns the number of terminated agent shell commands (0 when
+        kill_inflight is false), or None if the desktop is unknown.
+        """
+        info = self._desktops.get(desktop_id)
+        if not info:
+            return None
+        info.state = DesktopState.HUMAN_CONTROLLED
+        self._emit("human_controlled", desktop_id, state="human_controlled")
+        killed = self.terminate_agent_shells(desktop_id) if kill_inflight else 0
+        log.info("Desktop %s handed to human (terminated %d agent shell(s))",
+                 desktop_id, killed)
+        return killed
+
+    def _signal_shell_group(self, container: str, pidfile: str,
+                            sig: str, remove: bool = False) -> None:
+        """Signal the in-container process group recorded in pidfile."""
+        script = (f'p=$(cat {pidfile} 2>/dev/null); '
+                  f'if [ -n "$p" ]; then kill -{sig} -"$p" 2>/dev/null; fi')
+        if remove:
+            script += f'; rm -f {pidfile}'
+        try:
+            subprocess.run(["docker", "exec", container, "bash", "-c", script],
+                           capture_output=True, timeout=10)
+        except Exception as e:
+            log.warning("signal %s failed: %s", sig, e)
+
+    def terminate_agent_shells(self, desktop_id: str, grace: int = 3) -> int:
+        """Terminate tracked agent desktop_shell process groups for a desktop.
+
+        Returns the number of agent shell commands terminated. Only commands
+        launched through Desktop.shell (track_shell=True) are tracked, so this
+        cannot affect screenshots, installs, dashboard input, or desktop
+        services.
+        """
+        container = f"{CONTAINER_PREFIX}{desktop_id}"
+        pidfile = f"/tmp/.screenbox-agent-shell-{desktop_id}.pid"
+
+        read = subprocess.run(["docker", "exec", container, "bash", "-c",
+                               f'cat {pidfile} 2>/dev/null'],
+                              capture_output=True, text=True, timeout=10)
+        had_remote = bool((read.stdout or "").strip())
+
+        self._signal_shell_group(container, pidfile, "TERM")
+        time.sleep(grace)
+        self._signal_shell_group(container, pidfile, "KILL", remove=True)
+
+        with self._shell_lock:
+            procs = list(self._active_shells.pop(desktop_id, set()))
+        for proc in procs:
+            try:
+                if proc.poll() is None:
+                    proc.terminate()
+            except Exception:
+                pass
+        return max(len(procs), 1 if had_remote else 0)
+
+    def release_human_controlled(self, desktop_id: str) -> bool:
+        """Return the desktop to agent control after a human takeover."""
+        info = self._desktops.get(desktop_id)
+        if not info:
+            return False
+        if info.state != DesktopState.HUMAN_CONTROLLED:
+            return False
+        info.state = DesktopState.RUNNING
+        self._emit("human_released", desktop_id, state="running")
+        log.info("Desktop %s returned to agent control", desktop_id)
+        return True
+
     def exec(self, desktop_id: str, cmd: list[str], timeout: int = 10,
-             user: str = "screenbox") -> subprocess.CompletedProcess:
-        """Execute command inside a desktop container."""
+             user: str = "screenbox",
+             track_shell: bool = False) -> subprocess.CompletedProcess:
+        """Execute command inside a desktop container.
+
+        When track_shell is true, the command runs in its own process group and
+        is registered so terminate_agent_shells() can stop it on human takeover.
+        """
         info = self._desktops.get(desktop_id)
         if not info or info.state not in (DesktopState.RUNNING, DesktopState.HUMAN_CONTROLLED):
             raise RuntimeError(f"Desktop {desktop_id} is not running (state={info.state.value if info else 'unknown'})")
         self.touch(desktop_id)
-        return subprocess.run(
-            ["docker", "exec", "-u", user, f"{CONTAINER_PREFIX}{desktop_id}"] + cmd,
-            capture_output=True, timeout=timeout,
-        )
+        container = f"{CONTAINER_PREFIX}{desktop_id}"
+
+        if not track_shell:
+            return subprocess.run(
+                ["docker", "exec", "-u", user, container] + cmd,
+                capture_output=True, timeout=timeout,
+            )
+
+        pidfile = f"/tmp/.screenbox-agent-shell-{desktop_id}.pid"
+        # setsid --wait => new session/process-group leader, and docker exec waits
+        # for completion. The command runs as a child of the recorded PID, so the
+        # whole process group can be signalled on takeover.
+        wrapped = ["docker", "exec", "-u", user, container, "setsid", "--wait", "bash", "-c",
+                   f'echo $$ > {pidfile}; "$@"; rc=$?; rm -f {pidfile}; exit $rc', "bash"] + cmd
+        proc = subprocess.Popen(wrapped, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        with self._shell_lock:
+            self._active_shells.setdefault(desktop_id, set()).add(proc)
+        try:
+            out, err = proc.communicate(timeout=timeout)
+            return subprocess.CompletedProcess(proc.args, proc.returncode, out, err)
+        except subprocess.TimeoutExpired:
+            # Kill the container-side process group too; otherwise a command
+            # outliving its client timeout leaks inside the desktop.
+            self._signal_shell_group(container, pidfile, "TERM")
+            time.sleep(1)
+            self._signal_shell_group(container, pidfile, "KILL", remove=True)
+            proc.kill()
+            out, err = proc.communicate()
+            raise
+        finally:
+            with self._shell_lock:
+                active = self._active_shells.get(desktop_id)
+                if active is not None:
+                    active.discard(proc)
+                    if not active:
+                        self._active_shells.pop(desktop_id, None)
 
     def wait_ready(self, desktop_id: str, timeout: int = 15) -> bool:
         """Wait for desktop core services: X display + ws-bridge.

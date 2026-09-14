@@ -7,6 +7,7 @@ COPY server.py config.py state.py docker_helpers.py mcp_client.py mcp_events.py 
 COPY routes/ ./routes/
 COPY novnc/ ./novnc/
 COPY static/ ./static/
+RUN chmod -R a+rX /app
 RUN useradd -r -u 1000 -m screenbox
 USER screenbox
 
