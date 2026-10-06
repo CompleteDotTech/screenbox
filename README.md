@@ -1,3 +1,10 @@
+> **About this fork.** This is a fork of [dklymentiev/screenbox](https://github.com/dklymentiev/screenbox); the text below is upstream's README, unchanged.
+>
+> This fork adds one commit, "harden multi-agent sandbox deployment": strict-mode authentication on the MCP and HTTP endpoints, per-request identity, desktop ownership checks with admin-only list and register, a Docker socket proxy on an internal control network, admin human-takeover endpoints (in-flight `desktop_shell` termination is opt-in via `kill_inflight`), and a `deploy-hardened.sh` script that generates tokens and runs `setup.sh`.
+>
+> Upstream is the reference for features and support.
+
+
 # Screenbox
 
 Real desktops for AI agents.
